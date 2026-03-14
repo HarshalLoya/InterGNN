@@ -1,0 +1,29 @@
+% InterGNN Full Evaluation — 2026-03-13 20:08:55
+
+\begin{table}[htbp]
+\centering
+\caption{Performance comparison of InterGNN vs baseline models.}
+\label{tab:performance}
+\begin{tabular}{llccccc}
+\toprule
+\multicolumn{7}{c}{\textbf{MUTAG}} \\
+Model & ROC-AUC & PR-AUC & Accuracy & F1 & MCC \\\midrule
+InterGNN & 0.5476 & 0.6975 & 0.7500 & 0.8485 & 0.3504 \\
+GCN & 0.7381 & 0.8944 & 0.7000 & 0.8235 & 0.0000 \\
+GIN & 0.8929 & 0.9584 & 0.7000 & 0.8235 & 0.0000 \\
+\midrule
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\caption{Hypothesis testing results (paired t-test, $\alpha=0.05$).}
+\label{tab:hypothesis}
+\begin{tabular}{lcccc}
+\toprule
+Dataset & t-statistic & p-value & Reject $H_0$? & Decision \\\midrule
+MUTAG & 1.0000 & 0.329877 & No & No sig. diff. \\
+\bottomrule
+\end{tabular}
+\end{table}

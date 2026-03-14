@@ -86,9 +86,9 @@ class LossConfig:
 
 @dataclass
 class TrainingConfig:
-    pretrain_epochs: int = 50
-    finetune_epochs: int = 100
-    learning_rate: float = 1e-3
+    pretrain_epochs: int = 30
+    finetune_epochs: int = 30
+    learning_rate: float = 1e-2
     weight_decay: float = 1e-5
     lr_scheduler: str = "cosine"
     warmup_steps: int = 500

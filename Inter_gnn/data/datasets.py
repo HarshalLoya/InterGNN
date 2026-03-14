@@ -28,6 +28,14 @@ def _ensure_dir(path: str) -> str:
     return path
 
 
+class DTIData(Data):
+    """Custom Data class for drug-target interaction data with dual graphs."""
+    def __inc__(self, key, value, *args, **kwargs):
+        if key == 'edge_index_target':
+            return self.x_target.size(0)
+        return super().__inc__(key, value, *args, **kwargs)
+
+
 class InterGNNDataset(InMemoryDataset):
     """Base dataset wrapping a list of Data objects with metadata."""
 
@@ -111,13 +119,13 @@ def _build_dta_dataset(drug_smiles, target_seqs, affinities, name):
             if pg is not None: prot_cache[seq] = pg
         pg = prot_cache.get(seq)
         if pg is None: continue
-        data = Data(
-            x_drug=dg.x, edge_index_drug=dg.edge_index, edge_attr_drug=dg.edge_attr,
-            num_drug_atoms=dg.num_atoms,
+        data = DTIData(
+            x=dg.x, edge_index=dg.edge_index, edge_attr=dg.edge_attr,
             x_target=pg.x, edge_index_target=pg.edge_index, edge_attr_target=pg.edge_attr,
-            num_target_residues=pg.num_residues,
             y=torch.tensor([aff], dtype=torch.float32), idx=idx, smiles=smi, sequence=seq,
         )
+        data.num_nodes = dg.x.size(0)
+        data.num_nodes_target = pg.x.size(0)
         data_list.append(data); smiles_list.append(smi)
     logger.info(f"Loaded {name}: {len(data_list)} pairs")
     return InterGNNDataset(data_list, name, "regression", 1, smiles_list)
@@ -125,13 +133,31 @@ def _build_dta_dataset(drug_smiles, target_seqs, affinities, name):
 
 def _load_tdc_dti(name, data_dir):
     """Load a DTI dataset via TDC or local CSV."""
+    df = None
     try:
         from tdc.multi_pred import DTI
         df = DTI(name=name).get_data()
-    except ImportError:
-        csv = os.path.join(data_dir or DEFAULT_DATA_DIR, name.lower(), f"{name.lower()}.csv")
-        if os.path.exists(csv): df = pd.read_csv(csv)
-        else: raise FileNotFoundError(f"{name} not found. Install PyTDC or place CSV at {csv}")
+    except (ImportError, Exception):
+        csv_file = os.path.join(data_dir or DEFAULT_DATA_DIR, name.lower(), f"{name.lower()}.csv")
+        if os.path.exists(csv_file):
+            df = pd.read_csv(csv_file)
+        else:
+            raise FileNotFoundError(f"{name} not found. Install PyTDC or place CSV at {csv_file}")
+
+    # Robust column mapping for various naming conventions
+    rename_dict = {
+        "compound_iso_smiles": "Drug", "SMILES": "Drug", "smiles": "Drug",
+        "target_sequence": "Target", "Protein": "Target", "target": "Target",
+        "affinity": "Y", "label": "Y", "pkd": "Y", "value": "Y"
+    }
+    df = df.rename(columns=rename_dict)
+    
+    # Validation
+    for col in ["Drug", "Target", "Y"]:
+        if col not in df.columns:
+            available = ", ".join(df.columns)
+            raise KeyError(f"Missing required DTI column '{col}' in {name}. Available: {available}")
+
     return df["Drug"].tolist(), df["Target"].tolist(), df["Y"].tolist()
 
 
@@ -202,6 +228,3 @@ def load_dataset(name: str, data_dir=None, **kwargs) -> InterGNNDataset:
         raise ValueError(f"Unknown dataset '{name}'. Available: {sorted(DATASET_REGISTRY)}")
     return DATASET_REGISTRY[key](data_dir=data_dir, **kwargs)
 
-
-def list_datasets() -> List[str]:
-    return sorted(DATASET_REGISTRY.keys())
