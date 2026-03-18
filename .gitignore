@@ -5,6 +5,11 @@ __pycache__/
 
 # C extensions
 *.so
+*.pyc
+*.cpython-310.pyc
+*.cpython-311.pyc
+*.cpython-312.pyc
+*.cpython-313.pyc
 
 # Distribution / packaging
 bin/
@@ -150,3 +155,4 @@ cython_debug/
 
 # Results
 results/full_evaluation/checkpoints
+.DS_Store
