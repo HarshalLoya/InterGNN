@@ -124,22 +124,33 @@ class InterGNNDataModule:
         indices = self.split_indices[split]
         return [self.dataset.get(i) for i in indices]
 
+    def _dataloader_kwargs(self) -> dict:
+        """Returns kwargs for DataLoader initialization."""
+        kwargs = {
+            "batch_size": self.batch_size,
+            "num_workers": self.num_workers,
+        }
+        # For DTI datasets, we need to generate batch indicator for the target protein graph
+        if self.dataset_name.lower() in ["davis", "kiba", "bindingdb"]:
+            kwargs["follow_batch"] = ["x_target"]
+        return kwargs
+
     def train_dataloader(self) -> DataLoader:
         subset = self._get_subset("train")
         return DataLoader(
-            subset, batch_size=self.batch_size,
-            shuffle=True, num_workers=self.num_workers,
+            subset, shuffle=True,
             drop_last=(len(subset) > self.batch_size * 2),
+            **self._dataloader_kwargs()
         )
 
     def val_dataloader(self) -> DataLoader:
         return DataLoader(
-            self._get_subset("val"), batch_size=self.batch_size,
-            shuffle=False, num_workers=self.num_workers,
+            self._get_subset("val"), shuffle=False,
+            **self._dataloader_kwargs()
         )
 
     def test_dataloader(self) -> DataLoader:
         return DataLoader(
-            self._get_subset("test"), batch_size=self.batch_size,
-            shuffle=False, num_workers=self.num_workers,
+            self._get_subset("test"), shuffle=False,
+            **self._dataloader_kwargs()
         )

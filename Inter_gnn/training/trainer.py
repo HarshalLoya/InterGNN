@@ -164,7 +164,9 @@ class InterGNNTrainer:
                 kwargs["x_target"] = batch_data.x_target
                 kwargs["edge_index_target"] = batch_data.edge_index_target
                 kwargs["edge_attr_target"] = batch_data.edge_attr_target
-                kwargs["batch_target"] = getattr(batch_data, "batch_target", None)
+                # If using follow_batch=['x_target'], PyG creates x_target_batch
+                kwargs["batch_target"] = getattr(batch_data, "x_target_batch", 
+                                                 getattr(batch_data, "batch_target", None))
 
             # Concept labels
             if hasattr(batch_data, "concept_vector"):
@@ -217,7 +219,8 @@ class InterGNNTrainer:
                 kwargs["x_target"] = batch_data.x_target
                 kwargs["edge_index_target"] = batch_data.edge_index_target
                 kwargs["edge_attr_target"] = batch_data.edge_attr_target
-                kwargs["batch_target"] = getattr(batch_data, "batch_target", None)
+                kwargs["batch_target"] = getattr(batch_data, "x_target_batch", 
+                                                 getattr(batch_data, "batch_target", None))
 
             output = self.model(**kwargs)
             # Loss is computed on raw logits (head now always returns logits)
