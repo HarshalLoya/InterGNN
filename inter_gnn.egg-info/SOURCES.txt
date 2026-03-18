@@ -1,0 +1,8 @@
+README.md
+pyproject.toml
+inter_gnn.egg-info/PKG-INFO
+inter_gnn.egg-info/SOURCES.txt
+inter_gnn.egg-info/dependency_links.txt
+inter_gnn.egg-info/entry_points.txt
+inter_gnn.egg-info/requires.txt
+inter_gnn.egg-info/top_level.txt

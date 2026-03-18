@@ -1,3 +1,48 @@
+Metadata-Version: 2.4
+Name: inter-gnn
+Version: 1.0.0
+Summary: Interpretable GNN-Based Framework for Drug Discovery and Candidate Screening
+Author: Harshal Loya, Jash Chauhan, Het Gala
+License: MIT
+Project-URL: Homepage, https://github.com/inter-gnn/inter-gnn
+Project-URL: Documentation, https://inter-gnn.readthedocs.io
+Project-URL: Repository, https://github.com/inter-gnn/inter-gnn
+Keywords: graph-neural-networks,drug-discovery,explainable-ai,molecular-property-prediction,interpretability,activity-cliffs,concept-whitening
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Classifier: Topic :: Scientific/Engineering :: Bio-Informatics
+Classifier: Topic :: Scientific/Engineering :: Chemistry
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: torch>=2.0.0
+Requires-Dist: torch-geometric>=2.4.0
+Requires-Dist: rdkit>=2023.3.1
+Requires-Dist: numpy>=1.24.0
+Requires-Dist: scipy>=1.10.0
+Requires-Dist: pandas>=2.0.0
+Requires-Dist: scikit-learn>=1.2.0
+Requires-Dist: matplotlib>=3.7.0
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: tqdm>=4.65.0
+Provides-Extra: viz
+Requires-Dist: plotly>=5.14.0; extra == "viz"
+Requires-Dist: py3Dmol>=2.0.0; extra == "viz"
+Requires-Dist: seaborn>=0.12.0; extra == "viz"
+Requires-Dist: ipywidgets>=8.0.0; extra == "viz"
+Provides-Extra: dev
+Requires-Dist: pytest>=7.3.0; extra == "dev"
+Requires-Dist: pytest-cov>=4.1.0; extra == "dev"
+Requires-Dist: black>=23.0.0; extra == "dev"
+Requires-Dist: ruff>=0.1.0; extra == "dev"
+Requires-Dist: mypy>=1.4.0; extra == "dev"
+
 # InterGNN — Interpretable GNN-Based Framework for Drug Discovery
 
 <p align="center">
