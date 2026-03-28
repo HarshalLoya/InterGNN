@@ -1,0 +1,26 @@
+InterGNN Full Evaluation Report
+Generated: 2026-03-27 21:43:19.645165
+============================================================
+
+
+========================================
+Dataset: DAVIS
+========================================
+
+--- Performance Comparison ---
+  InterGNN: {'rmse': 59.67161178588867, 'mae': 45.4478759765625, 'r2': -3001.318115234375, 'pearson_r': 0.12895960447460553, 'pearson_p': 2.6318027618321693e-11, 'spearman_rho': 0.17395294516344137, 'ci': 0.5523367912410222}
+  GCN: {'rmse': 1.0018911361694336, 'mae': 0.7909868359565735, 'r2': 0.15362626314163208, 'pearson_r': 0.4146635466229327, 'pearson_p': 0.0, 'spearman_rho': 0.1922286579877685, 'ci': 0.5051763110903619}
+  GIN: {'rmse': 1.1154121160507202, 'mae': 0.768196165561676, 'r2': -0.049039483070373535, 'pearson_r': 0.3732672158130299, 'pearson_p': 0.0, 'spearman_rho': 0.11703581443713715, 'ci': 0.45682890610369503}
+
+--- Interpretability ---
+  {'deletion_auc': 0.0, 'insertion_auc': 0.9504487171153837, 'jaccard_stability': 0.7468253968253968, 'chemical_validity': 1.0}
+
+--- Generalization ---
+  {'random_split': {'rmse': 20.462949752807617, 'mae': 7.239516735076904, 'r2': -567.7252807617188, 'pearson_r': -0.33791648320872625, 'pearson_p': 0.0, 'spearman_rho': -0.2979332517704219, 'ci': 0.3301106840769298}, 'scaffold_split': {'rmse': 4.101061820983887, 'mae': 2.216778516769409, 'r2': -13.181224822998047, 'pearson_r': 0.08695201362754545, 'pearson_p': 7.318747520912439e-06, 'spearman_rho': 0.18096673369744604, 'ci': 0.5791428292595435}}
+
+--- Hypothesis Testing ---
+  H₀: InterGNN and GCN have equal mean performance
+  H₁: InterGNN has significantly better performance than GCN
+  t-statistic: -59.4306
+  p-value: 0.000000
+  Decision (α=0.05): Reject H₀

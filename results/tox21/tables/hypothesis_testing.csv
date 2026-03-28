@@ -1,0 +1,2 @@
+dataset,t_statistic,p_value,mean_intergnn,mean_gcn,reject_h0,alpha,n_samples
+tox21,0.6188254593007096,0.536051496543662,0.9019579819922824,0.9011004716306988,False,0.05,6997

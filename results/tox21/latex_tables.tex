@@ -1,0 +1,29 @@
+% InterGNN Full Evaluation — 2026-03-26 20:31:45
+
+\begin{table}[htbp]
+\centering
+\caption{Performance comparison of InterGNN vs baseline models.}
+\label{tab:performance}
+\begin{tabular}{llccccc}
+\toprule
+\multicolumn{7}{c}{\textbf{TOX21}} \\
+Model & ROC-AUC & PR-AUC & Accuracy & F1 & MCC \\\midrule
+InterGNN & 0.7002 & 0.2543 & 0.8967 & 0.1065 & 0.1049 \\
+GCN & 0.6659 & 0.2213 & 0.8953 & 0.0835 & 0.0876 \\
+GIN & 0.6933 & 0.2770 & 0.8899 & 0.1612 & 0.1366 \\
+\midrule
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\caption{Hypothesis testing results (paired t-test, $\alpha=0.05$).}
+\label{tab:hypothesis}
+\begin{tabular}{lcccc}
+\toprule
+Dataset & t-statistic & p-value & Reject $H_0$? & Decision \\\midrule
+TOX21 & 0.6188 & 0.536051 & No & No sig. diff. \\
+\bottomrule
+\end{tabular}
+\end{table}

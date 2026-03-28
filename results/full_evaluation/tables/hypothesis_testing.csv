@@ -1,2 +1,0 @@
-dataset,t_statistic,p_value,mean_intergnn,mean_gcn,reject_h0,alpha,n_samples
-mutag,1.0000000000000002,0.3298768009211248,0.75,0.7,False,0.05,20

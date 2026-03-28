@@ -1,0 +1,2 @@
+dataset,t_statistic,p_value,mean_intergnn,mean_gcn,reject_h0,alpha,n_samples
+davis,-59.43056863557365,0.0,-45.4478759765625,-0.7909868359565735,True,0.05,2652

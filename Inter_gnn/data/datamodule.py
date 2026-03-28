@@ -129,6 +129,7 @@ class InterGNNDataModule:
         kwargs = {
             "batch_size": self.batch_size,
             "num_workers": self.num_workers,
+            "pin_memory": True,
         }
         # For DTI datasets, we need to generate batch indicator for the target protein graph
         if self.dataset_name.lower() in ["davis", "kiba", "bindingdb"]:

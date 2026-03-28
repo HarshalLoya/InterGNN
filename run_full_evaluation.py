@@ -96,8 +96,8 @@ DATASET_CONFIGS = {
               "batch_size": 128, "hidden_dim": 256, "num_mol_layers": 5,
               "pretrain_epochs": 30, "finetune_epochs": 30, "use_target": False},
     "davis": {"task_type": "regression", "num_tasks": 1, "split_method": "scaffold",
-              "batch_size": 32, "hidden_dim": 256, "num_mol_layers": 4,
-              "pretrain_epochs": 30, "finetune_epochs": 30, "use_target": True},
+              "batch_size": 8, "hidden_dim": 256, "num_mol_layers": 4,
+              "pretrain_epochs": 8, "finetune_epochs": 8, "use_target": True},
     "kiba":  {"task_type": "regression", "num_tasks": 1, "split_method": "scaffold",
               "batch_size": 32, "hidden_dim": 256, "num_mol_layers": 4,
               "pretrain_epochs": 30, "finetune_epochs": 30, "use_target": True},
@@ -213,13 +213,26 @@ def build_config(ds_name, quick=False):
     if quick:
         config.training.pretrain_epochs = 2
         config.training.finetune_epochs = 2
-        config.training.early_stopping_patience = 100
+        config.training.early_stopping_patience = 10
     else:
         config.training.pretrain_epochs = ds["pretrain_epochs"]
         config.training.finetune_epochs = ds["finetune_epochs"]
     config.training.learning_rate = 1e-3
     config.training.seed = SEED
     config.training.log_interval = 5
+
+    # Scale down auxiliary interpretability losses so they don't
+    # overpower the prediction objective during Phase 2 fine-tuning
+    config.loss.lambda_pred = 1.0
+    config.loss.lambda_pull = 0.005
+    config.loss.lambda_push = 0.005
+    config.loss.lambda_diversity = 0.001
+    config.loss.lambda_motif = 0.005
+    config.loss.lambda_connectivity = 0.005
+    config.loss.lambda_concept = 0.005
+    config.loss.lambda_decorrelation = 0.001
+    config.loss.lambda_stability = 0.005
+
     return config
 
 
@@ -366,83 +379,156 @@ def plot_hypothesis_testing(ds_name, ht_results, plots_dir):
     logger.info(f"Saved: {path}")
 
 
+def _importance_to_rgb_strong(val):
+    """Map importance to bold red/green."""
+    # Darker reds/greens for better contrast
+    if val > 0.5:
+        # Red spectrum
+        intensity = (val - 0.5) * 2.0
+        return (0.7 + 0.3 * intensity, 0.1, 0.1)
+    else:
+        # Green spectrum
+        intensity = (0.5 - val) * 2.0
+        return (0.1, 0.6 + 0.3 * intensity, 0.2)
+
+def _draw_mol_saliency(mol, importance, size=(500, 400)):
+    """Return a PIL Image of *mol* with thick coloured bonds and atoms matching the visual style."""
+    from rdkit.Chem import AllChem
+    from rdkit.Chem.Draw import rdMolDraw2D
+    import io
+    from PIL import Image
+
+    AllChem.Compute2DCoords(mol)
+    n_atoms = mol.GetNumAtoms()
+    
+    atom_colors = {}
+    atom_radii = {}
+    highlight_atoms = []
+    
+    # Yellow background highlight for the entire molecule context,
+    # or specific atom/bond colors to match the format.
+    for idx in range(n_atoms):
+        val = float(importance[idx]) if idx < len(importance) else 0.0
+        atom_colors[idx] = _importance_to_rgb_strong(val)
+        atom_radii[idx] = 0.45
+        highlight_atoms.append(idx)
+
+    bond_colors = {}
+    highlight_bonds = []
+    for bond in mol.GetBonds():
+        idx = bond.GetIdx()
+        u = bond.GetBeginAtomIdx()
+        v = bond.GetEndAtomIdx()
+        val_u = float(importance[u]) if u < len(importance) else 0.0
+        val_v = float(importance[v]) if v < len(importance) else 0.0
+        val = (val_u + val_v) / 2.0
+        bond_colors[idx] = _importance_to_rgb_strong(val)
+        highlight_bonds.append(idx)
+
+    d2d = rdMolDraw2D.MolDraw2DCairo(size[0], size[1])
+    opts = d2d.drawOptions()
+    
+    # To mimic the image:
+    # 1. Background highlights are filled, 
+    # 2. Bonds are thick and highlighted with same colour as atoms.
+    # 3. We use a base light yellow highlight beneath by setting a custom highlight colour.
+    # Actually, setting atom and bond colours directly overrides the highlight colour.
+    # We can use the atom palette to colour the chemical symbols and use the highlight for the background blocks.
+    opts.fillHighlights = True
+    opts.clearBackground = True
+    opts.bondLineWidth = 3
+    opts.continuousHighlight = False  # capsule style 
+
+    d2d.DrawMolecule(mol, 
+                     highlightAtoms=highlight_atoms, 
+                     highlightAtomColors=atom_colors, 
+                     highlightBonds=highlight_bonds, 
+                     highlightBondColors=bond_colors,
+                     highlightAtomRadii=atom_radii)
+    d2d.FinishDrawing()
+    
+    stream = io.BytesIO(d2d.GetDrawingText())
+    return Image.open(stream)
+
+
 def plot_sample_explanations(model, test_loader, plots_dir, ds_name, num_samples=3):
-    """Visualize atom importance for a few test samples."""
+    """Visualize atom importance with red-green saliency maps."""
     _pub_style()
+    os.makedirs(plots_dir, exist_ok=True)
     logger.info(f"[{ds_name}] Starting sample explanation visualization...")
     model.eval()
     device = next(model.parameters()).device
-    
+
     samples_plotted = 0
     test_subset = [test_loader.dataset[i] for i in range(min(num_samples * 2, len(test_loader.dataset)))]
-    
+
     for i, data in enumerate(test_subset):
         if samples_plotted >= num_samples: break
-        
         data = data.to(device)
-        # Use single-sample batch indices
         b = torch.zeros(data.x.size(0), dtype=torch.long, device=device)
-        
         try:
             imp = model.get_node_importance(data.x, data.edge_index, data.edge_attr, b)
             imp = (imp - imp.min()) / (imp.max() - imp.min() + 1e-8)
-            
+
             smi = getattr(data, "smiles", None)
             if not smi and ds_name == "mutag" and hasattr(data, "idx") and data.idx < len(MUTAG_SMILES):
                 smi = MUTAG_SMILES[data.idx]
-            
             if not smi: continue
-            
+
             from rdkit import Chem
-            from rdkit.Chem import Draw
             mol = Chem.MolFromSmiles(smi)
-            if mol:
-                n_atoms = mol.GetNumAtoms()
-                colors = {}
-                for atom_idx, val in enumerate(imp.tolist()):
-                    if atom_idx < n_atoms:
-                        colors[atom_idx] = (1.0, 1.0 - val, 1.0 - val)
-                
-                path = os.path.join(plots_dir, f"explanation_{ds_name}_{samples_plotted}.png")
-                img = Draw.MolToImage(mol, size=(400, 400), 
-                                      highlightAtoms=list(colors.keys()),
-                                      highlightAtomColors=colors)
-                img.save(path)
-                logger.info(f"[{ds_name}] Saved explanation plot to {path}")
-                samples_plotted += 1
+            if mol is None: continue
+
+            fig, ax = plt.subplots(figsize=(6, 5))
+            img = _draw_mol_saliency(mol, imp.cpu().tolist())
+            ax.imshow(img); ax.axis("off")
+            label_val = float(data.y.flatten()[0]) if data.y is not None else "?"
+            ax.set_title(f"{ds_name.upper()} — sample {samples_plotted}  (y={label_val})",
+                         fontweight="bold", fontsize=12)
+            # colour-bar legend
+            from matplotlib.colors import LinearSegmentedColormap
+            cmap = LinearSegmentedColormap.from_list("imp", [(0.0,1.0,0.2),(1.0,1.0,0.2),(1.0,0.0,0.2)])
+            sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(0, 1))
+            sm.set_array([])
+            cbar = fig.colorbar(sm, ax=ax, fraction=0.03, pad=0.04)
+            cbar.set_label("Atom importance", fontsize=10)
+            fig.tight_layout()
+            path = os.path.join(plots_dir, f"explanation_{samples_plotted}.png")
+            fig.savefig(path, dpi=PLOT_DPI); plt.close(fig)
+            logger.info(f"[{ds_name}] Saved explanation plot to {path}")
+            samples_plotted += 1
         except Exception as e:
             logger.warning(f"[{ds_name}] Plotting failed for sample {i}: {e}")
-            
+
     logger.info(f"[{ds_name}] Finished visualization. Saved {samples_plotted} sample explanations.")
 
 
-def plot_activity_cliff_example(smiles_a, smiles_b, imp_a, imp_b, info, plots_dir, ds_name):
-    """Side-by-side saliency visualization of an activity cliff pair."""
+def plot_activity_cliff_pair(smiles_a, smiles_b, imp_a, imp_b, info, save_path):
+    """Side-by-side saliency visualization of one activity cliff pair."""
     _pub_style()
+    from rdkit import Chem
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     for ax_i, (smi, imp, label) in enumerate([
-        (smiles_a, imp_a, f"Mol A (y={info['act_a']:.2f})"),
-        (smiles_b, imp_b, f"Mol B (y={info['act_b']:.2f})"),
+        (smiles_a, imp_a, f"Mol A  (y={info['act_a']:.2f})"),
+        (smiles_b, imp_b, f"Mol B  (y={info['act_b']:.2f})"),
     ]):
-        try:
-            from rdkit import Chem
+        mol = Chem.MolFromSmiles(smi)
+        if mol and imp is not None:
+            img = _draw_mol_saliency(mol, imp)
+            axes[ax_i].imshow(img)
+        elif mol:
             from rdkit.Chem import Draw, AllChem
-            mol = Chem.MolFromSmiles(smi)
-            if mol:
-                AllChem.Compute2DCoords(mol)
-                img = Draw.MolToImage(mol, size=(400, 300))
-                axes[ax_i].imshow(img)
-        except Exception:
+            AllChem.Compute2DCoords(mol)
+            axes[ax_i].imshow(Draw.MolToImage(mol, size=(500, 400)))
+        else:
             axes[ax_i].text(0.5, 0.5, smi, ha="center", va="center", fontsize=8, wrap=True)
         axes[ax_i].set_title(label, fontweight="bold")
         axes[ax_i].axis("off")
-    fig.suptitle(f"Activity Cliff Example — {ds_name.upper()}\n"
-                 f"Similarity={info['similarity']:.3f}, ΔActivity={info['act_diff']:.3f}",
+    fig.suptitle(f"Activity Cliff — Sim={info['similarity']:.3f}, ΔActivity={info['act_diff']:.3f}",
                  fontweight="bold", fontsize=13)
     fig.tight_layout()
-    path = os.path.join(plots_dir, f"activity_cliff_{ds_name}.png")
-    fig.savefig(path, dpi=PLOT_DPI); plt.close(fig)
-    logger.info(f"Saved: {path}")
+    fig.savefig(save_path, dpi=PLOT_DPI); plt.close(fig)
+    logger.info(f"Saved: {save_path}")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -453,16 +539,24 @@ def run_dataset_evaluation(ds_name, output_dir, quick=False):
     ds_cfg = DATASET_CONFIGS[ds_name]
     task_type = ds_cfg["task_type"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info(f"Using device: {device}")
+    if device.type == "cpu" and torch.cuda.device_count() > 0:
+        logger.warning("CUDA is surface-available but torch.cuda.is_available() is False. Check your PyTorch/CUDA installation.")
+    elif device.type == "cpu":
+        logger.info("CUDA not available, falling back to CPU.")
     plots_dir = os.path.join(output_dir, "plots")
+    ds_plots_dir = os.path.join(plots_dir, ds_name)
     tables_dir = os.path.join(output_dir, "tables")
-    os.makedirs(plots_dir, exist_ok=True); os.makedirs(tables_dir, exist_ok=True)
+    os.makedirs(plots_dir, exist_ok=True); os.makedirs(ds_plots_dir, exist_ok=True)
+    os.makedirs(tables_dir, exist_ok=True)
 
     results = {"dataset": ds_name, "task_type": task_type}
 
     # ── 1. Load Data ──
     logger.info(f"\n{'='*60}\n  {ds_name.upper()} — Loading Data\n{'='*60}")
+    num_workers = 0
     dm = InterGNNDataModule(dataset_name=ds_name, split_method=ds_cfg["split_method"],
-                            batch_size=ds_cfg["batch_size"], seed=SEED)
+                            batch_size=ds_cfg["batch_size"], num_workers=num_workers, seed=SEED)
     dm.setup()
     train_loader = dm.train_dataloader(); val_loader = dm.val_dataloader(); test_loader = dm.test_dataloader()
 
@@ -542,7 +636,7 @@ def run_dataset_evaluation(ds_name, output_dir, quick=False):
             d = d.to(trainer.device)
             imp1 = trainer.model.get_node_importance(d.x, d.edge_index, d.edge_attr,
                 torch.zeros(d.x.shape[0], dtype=torch.long, device=trainer.device))
-            x_noisy = d.x + 0.05 * torch.randn_like(d.x)
+            x_noisy = d.x.float() + 0.05     * torch.randn_like(d.x.float())
             imp2 = trainer.model.get_node_importance(x_noisy, d.edge_index, d.edge_attr,
                 torch.zeros(d.x.shape[0], dtype=torch.long, device=trainer.device))
             k = min(5, imp1.shape[0])
@@ -573,55 +667,61 @@ def run_dataset_evaluation(ds_name, output_dir, quick=False):
     logger.info(f"[{ds_name}] Interpretability: {interp}")
 
     # ── 5. Generalization Test (scaffold vs random) ──
-    logger.info(f"[{ds_name}] Running generalization test...")
-    try:
-        # Random split
-        dm_rand = InterGNNDataModule(dataset_name=ds_name, split_method="random",
-                                     batch_size=ds_cfg["batch_size"], seed=SEED)
-        dm_rand.setup()
-        config_rand = build_config(ds_name, quick=quick)
-        config_rand.model.atom_feat_dim = atom_dim; config_rand.model.bond_feat_dim = bond_dim
-        config_rand.data.split_method = "random"
-        config_rand.training.checkpoint_dir = os.path.join(output_dir, "checkpoints", f"{ds_name}_random")
-        trainer_rand = InterGNNTrainer(config_rand)
-        trainer_rand.fit(dm_rand.train_dataloader(), dm_rand.val_dataloader())
-        eval_rand = trainer_rand._eval_epoch(dm_rand.test_dataloader())
-        p_rand = eval_rand["predictions"].numpy()
-        t_rand = eval_rand["targets"].numpy()
-        if p_rand.ndim == 1: p_rand = p_rand.reshape(-1, 1)
-        if t_rand.ndim == 1: t_rand = t_rand.reshape(-1, 1)
-        rand_metrics = compute_classification_metrics(p_rand, t_rand) if task_type == "classification" \
-            else compute_regression_metrics(p_rand, t_rand)
-
-        # Scaffold split (skip if smiles not available - use existing metrics)
-        if dm.dataset.smiles_list:
-            dm_scaf = InterGNNDataModule(dataset_name=ds_name, split_method="scaffold",
+    skip_gen = quick and ds_name in ("davis", "kiba")
+    if skip_gen:
+        logger.info(f"[{ds_name}] Skipping generalization test in quick mode (large dataset)")
+        results["generalization"] = {"note": "Skipped in quick mode"}
+    else:
+        logger.info(f"[{ds_name}] Running generalization test...")
+        try:
+            # Random split
+            dm_rand = InterGNNDataModule(dataset_name=ds_name, split_method="random",
                                          batch_size=ds_cfg["batch_size"], seed=SEED)
-            dm_scaf.setup()
-            config_scaf = build_config(ds_name, quick=quick)
-            config_scaf.model.atom_feat_dim = atom_dim; config_scaf.model.bond_feat_dim = bond_dim
-            config_scaf.data.split_method = "scaffold"
-            config_scaf.training.checkpoint_dir = os.path.join(output_dir, "checkpoints", f"{ds_name}_scaffold")
-            trainer_scaf = InterGNNTrainer(config_scaf)
-            trainer_scaf.fit(dm_scaf.train_dataloader(), dm_scaf.val_dataloader())
-            eval_scaf = trainer_scaf._eval_epoch(dm_scaf.test_dataloader())
-            p_scaf = eval_scaf["predictions"].numpy()
-            t_scaf = eval_scaf["targets"].numpy()
-            if p_scaf.ndim == 1: p_scaf = p_scaf.reshape(-1, 1)
-            if t_scaf.ndim == 1: t_scaf = t_scaf.reshape(-1, 1)
-            scaf_metrics = compute_classification_metrics(p_scaf, t_scaf) if task_type == "classification" \
-                else compute_regression_metrics(p_scaf, t_scaf)
-        else:
-            scaf_metrics = rand_metrics  # fallback
+            dm_rand.setup()
+            config_rand = build_config(ds_name, quick=quick)
+            config_rand.model.atom_feat_dim = atom_dim; config_rand.model.bond_feat_dim = bond_dim
+            config_rand.data.split_method = "random"
+            config_rand.training.checkpoint_dir = os.path.join(output_dir, "checkpoints", f"{ds_name}_random")
+            trainer_rand = InterGNNTrainer(config_rand)
+            trainer_rand.fit(dm_rand.train_dataloader(), dm_rand.val_dataloader())
+            eval_rand = trainer_rand._eval_epoch(dm_rand.test_dataloader())
+            p_rand = eval_rand["predictions"].numpy()
+            t_rand = eval_rand["targets"].numpy()
+            if p_rand.ndim == 1: p_rand = p_rand.reshape(-1, 1)
+            if t_rand.ndim == 1: t_rand = t_rand.reshape(-1, 1)
+            rand_metrics = compute_classification_metrics(p_rand, t_rand) if task_type == "classification" \
+                else compute_regression_metrics(p_rand, t_rand)
 
-        results["generalization"] = {"random_split": rand_metrics, "scaffold_split": scaf_metrics}
-        plot_generalization_comparison(ds_name, rand_metrics, scaf_metrics, plots_dir, task_type)
-    except Exception as e:
-        logger.warning(f"Generalization test failed: {e}")
-        results["generalization"] = {"error": str(e)}
+            # Scaffold split (skip if smiles not available - use existing metrics)
+            if dm.dataset.smiles_list:
+                dm_scaf = InterGNNDataModule(dataset_name=ds_name, split_method="scaffold",
+                                             batch_size=ds_cfg["batch_size"], seed=SEED)
+                dm_scaf.setup()
+                config_scaf = build_config(ds_name, quick=quick)
+                config_scaf.model.atom_feat_dim = atom_dim; config_scaf.model.bond_feat_dim = bond_dim
+                config_scaf.data.split_method = "scaffold"
+                config_scaf.training.checkpoint_dir = os.path.join(output_dir, "checkpoints", f"{ds_name}_scaffold")
+                trainer_scaf = InterGNNTrainer(config_scaf)
+                trainer_scaf.fit(dm_scaf.train_dataloader(), dm_scaf.val_dataloader())
+                eval_scaf = trainer_scaf._eval_epoch(dm_scaf.test_dataloader())
+                p_scaf = eval_scaf["predictions"].numpy()
+                t_scaf = eval_scaf["targets"].numpy()
+                if p_scaf.ndim == 1: p_scaf = p_scaf.reshape(-1, 1)
+                if t_scaf.ndim == 1: t_scaf = t_scaf.reshape(-1, 1)
+                scaf_metrics = compute_classification_metrics(p_scaf, t_scaf) if task_type == "classification" \
+                    else compute_regression_metrics(p_scaf, t_scaf)
+            else:
+                scaf_metrics = rand_metrics  # fallback
+
+            results["generalization"] = {"random_split": rand_metrics, "scaffold_split": scaf_metrics}
+            plot_generalization_comparison(ds_name, rand_metrics, scaf_metrics, plots_dir, task_type)
+        except Exception as e:
+            logger.warning(f"Generalization test failed: {e}")
+            results["generalization"] = {"error": str(e)}
 
     # ── 6. Activity Cliff / Counterfactual Example ──
-    logger.info(f"[{ds_name}] Generating activity cliff example...")
+    logger.info(f"[{ds_name}] Generating activity cliffs...")
+    cliff_dir = os.path.join(ds_plots_dir, "activity_cliffs"); os.makedirs(cliff_dir, exist_ok=True)
     try:
         smiles_list = dm.dataset.smiles_list if dm.dataset.smiles_list else (
             MUTAG_SMILES[:min(len(dm.dataset), len(MUTAG_SMILES))] if ds_name == "mutag" else [])
@@ -632,26 +732,47 @@ def run_dataset_evaluation(ds_name, output_dir, quick=False):
                 activities.append(float(d.y.flatten()[0]) if d.y is not None else 0.0)
             if len(activities) < len(smiles_list):
                 smiles_list = smiles_list[:len(activities)]
-            cliffs = find_cliff_pairs(smiles_list, activities, sim_threshold=0.5, act_threshold=0.5, max_pairs=5)
+            cliffs = find_cliff_pairs(smiles_list, activities, sim_threshold=0.5, act_threshold=0.5, max_pairs=20)
             if cliffs:
-                cp = cliffs[0]
-                plot_activity_cliff_example(
-                    cp["smiles_i"], cp["smiles_j"], None, None,
-                    {"act_a": cp.get("activity_i", 0.0) or 0.0, "act_b": cp.get("activity_j", 0.0) or 0.0,
-                     "similarity": cp.get("similarity", 0.0), "act_diff": cp.get("activity_diff", 0.0)},
-                    plots_dir, ds_name)
-                results["activity_cliff"] = cp
+                results["activity_cliffs"] = cliffs
+                for ci, cp in enumerate(cliffs):
+                    # Compute saliency for each molecule in the pair
+                    imp_a, imp_b = None, None
+                    try:
+                        from rdkit import Chem
+                        for smi_key, imp_ref in [("smiles_i", "imp_a"), ("smiles_j", "imp_b")]:
+                            mol = Chem.MolFromSmiles(cp[smi_key])
+                            if mol is None: continue
+                            # find matching data object to get importance
+                            idx_key = "idx_i" if smi_key == "smiles_i" else "idx_j"
+                            didx = cp.get(idx_key, -1)
+                            if 0 <= didx < dm.dataset.len():
+                                dd = dm.dataset.get(didx).to(trainer.device)
+                                bb = torch.zeros(dd.x.size(0), dtype=torch.long, device=trainer.device)
+                                raw_imp = trainer.model.get_node_importance(dd.x, dd.edge_index, dd.edge_attr, bb)
+                                raw_imp = (raw_imp - raw_imp.min()) / (raw_imp.max() - raw_imp.min() + 1e-8)
+                                if imp_ref == "imp_a": imp_a = raw_imp.cpu().tolist()
+                                else: imp_b = raw_imp.cpu().tolist()
+                    except Exception:
+                        pass
+                    info = {"act_a": cp.get("activity_i", 0.0) or 0.0,
+                            "act_b": cp.get("activity_j", 0.0) or 0.0,
+                            "similarity": cp.get("similarity", 0.0),
+                            "act_diff": cp.get("activity_diff", 0.0)}
+                    save_path = os.path.join(cliff_dir, f"cliff_pair_{ci}.png")
+                    plot_activity_cliff_pair(cp["smiles_i"], cp["smiles_j"], imp_a, imp_b, info, save_path)
+                logger.info(f"[{ds_name}] Saved {len(cliffs)} activity cliff pairs to {cliff_dir}")
             else:
-                logger.info(f"[{ds_name}] No cliff pairs found, trying with lower thresholds")
-                results["activity_cliff"] = {"note": "No cliff pairs found"}
+                logger.info(f"[{ds_name}] No cliff pairs found")
+                results["activity_cliffs"] = []
         else:
-            results["activity_cliff"] = {"note": "No SMILES available"}
+            results["activity_cliffs"] = []
     except Exception as e:
-        logger.warning(f"Activity cliff example failed: {e}")
+        logger.warning(f"Activity cliff generation failed: {e}")
 
     # ── 7. Visualize Sample Explanations ──
     logger.info(f"[{ds_name}] Visualizing sample explanations...")
-    plot_sample_explanations(trainer.model, test_loader, plots_dir, ds_name)
+    plot_sample_explanations(trainer.model, test_loader, ds_plots_dir, ds_name)
 
     # ── 7. Hypothesis Testing ──
     logger.info(f"[{ds_name}] Performing hypothesis testing...")
@@ -694,16 +815,23 @@ def generate_all_tables(all_results, output_dir):
     """Generate CSV tables, LaTeX, and text report."""
     tables_dir = os.path.join(output_dir, "tables"); os.makedirs(tables_dir, exist_ok=True)
 
-    # ── CSV: Performance Comparison ──
-    rows = []
+    # ── CSV: Performance Comparison (separate for classification vs regression) ──
+    cls_rows, reg_rows = [], []
     for ds, res in all_results.items():
         perf = res.get("performance", {})
         for model_name, metrics in perf.items():
             row = {"dataset": ds, "model": model_name, "task_type": res["task_type"]}
-            row.update(metrics); rows.append(row)
-    if rows:
-        with open(os.path.join(tables_dir, "performance_comparison.csv"), "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=rows[0].keys()); w.writeheader(); w.writerows(rows)
+            row.update(metrics)
+            if res["task_type"] == "classification":
+                cls_rows.append(row)
+            else:
+                reg_rows.append(row)
+    if cls_rows:
+        with open(os.path.join(tables_dir, "performance_classification.csv"), "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=cls_rows[0].keys()); w.writeheader(); w.writerows(cls_rows)
+    if reg_rows:
+        with open(os.path.join(tables_dir, "performance_regression.csv"), "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=reg_rows[0].keys()); w.writeheader(); w.writerows(reg_rows)
 
     # ── CSV: Interpretability ──
     rows2 = []

@@ -13,6 +13,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch_geometric.utils import to_dense_batch
 
 
 class CrossAttentionFusion(nn.Module):
@@ -138,25 +139,21 @@ class CrossAttentionFusion(nn.Module):
         """
         # Convert scatter-format to padded batch format for attention
         B = mol_graph_emb.shape[0]
-        device = mol_node_emb.device
 
-        # Get max node counts
-        mol_counts = torch.bincount(mol_batch, minlength=B)
-        target_counts = torch.bincount(target_batch, minlength=B)
-        max_mol = int(mol_counts.max())
-        max_target = int(target_counts.max())
+        # Efficient GPU-side padding using PyTorch Geometric
+        mol_padded, mol_mask = to_dense_batch(mol_node_emb, mol_batch)
+        target_padded, target_mask = to_dense_batch(target_node_emb, target_batch)
 
-        # Pad to (B, max_N, D)
-        mol_padded = torch.zeros(B, max_mol, self.hidden_dim, device=device)
-        target_padded = torch.zeros(B, max_target, self.hidden_dim, device=device)
-
-        for i in range(B):
-            mol_mask_i = (mol_batch == i)
-            target_mask_i = (target_batch == i)
-            n_mol = mol_mask_i.sum()
-            n_target = target_mask_i.sum()
-            mol_padded[i, :n_mol] = mol_node_emb[mol_mask_i][:n_mol]
-            target_padded[i, :n_target] = target_node_emb[target_mask_i][:n_target]
+        # Pad shorter sequences if batch sizes don't perfectly align with B
+        # (e.g. if some graphs in the batch have 0 atoms/residues, though unlikely)
+        if mol_padded.shape[0] < B:
+            pad_size = B - mol_padded.shape[0]
+            mol_padded = F.pad(mol_padded, (0, 0, 0, 0, 0, pad_size))
+            mol_mask = F.pad(mol_mask, (0, 0, 0, pad_size))
+        if target_padded.shape[0] < B:
+            pad_size = B - target_padded.shape[0]
+            target_padded = F.pad(target_padded, (0, 0, 0, 0, 0, pad_size))
+            target_mask = F.pad(target_mask, (0, 0, 0, pad_size))
 
         # Project
         Q = self.W_q(mol_padded)
@@ -164,12 +161,15 @@ class CrossAttentionFusion(nn.Module):
         V = self.W_v(target_padded)
 
         # Cross-attention
-        H_tilde, attn_weights = self._attention(Q, K, V)
+        H_tilde, attn_weights = self._attention(Q, K, V, target_mask=target_mask)
         H_tilde = self.output_proj(H_tilde)
         H_tilde = self.layer_norm(H_tilde + mol_padded)  # residual + norm
 
         # Pool attended embeddings → (B, D)
-        pooled = H_tilde.mean(dim=1)
+        # Average over valid atoms according to mol_mask
+        valid_sums = (H_tilde * mol_mask.unsqueeze(-1).float()).sum(dim=1)
+        valid_counts = mol_mask.sum(dim=1, keepdim=True).float().clamp(min=1e-8)
+        pooled = valid_sums / valid_counts
 
         # Fuse: [z_m || z_p || pool(H_tilde)]
         fused = torch.cat([mol_graph_emb, target_graph_emb, pooled], dim=-1)

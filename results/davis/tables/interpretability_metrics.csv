@@ -1,0 +1,2 @@
+dataset,deletion_auc,insertion_auc,jaccard_stability,chemical_validity
+davis,0.0,0.9504487171153837,0.7468253968253968,1.0

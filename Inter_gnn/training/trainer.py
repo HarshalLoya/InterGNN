@@ -59,6 +59,7 @@ class InterGNNTrainer:
     def __init__(self, config: InterGNNConfig):
         self.config = config
         self.device = _resolve_device(config.training.device)
+        logger.info(f"InterGNNTrainer initialized on device: {self.device}")
 
         # Build model
         self.model = InterGNN(
@@ -141,15 +142,19 @@ class InterGNNTrainer:
                 momentum=cfg.concept_momentum,
             ).to(self.device)
 
-    def _train_epoch(self, loader, optimizer, phase: str = "pretrain") -> Dict:
+    def _train_epoch(self, loader, optimizer, phase="pretrain", accumulation_steps=1) -> Dict:
         self.model.train()
         total_loss = 0.0
         loss_components = {}
         num_batches = 0
+        
+        # Determine actual accumulation steps (only accumulate if steps > 1)
+        # Avoid dividing by 0
+        acc_steps = max(1, accumulation_steps)
+        optimizer.zero_grad(set_to_none=True)
 
         for batch_data in tqdm(loader, desc=f"Training ({phase})", leave=False, disable=(len(loader) < 10)):
             batch_data = batch_data.to(self.device)
-            optimizer.zero_grad(set_to_none=True)  # faster than zero_grad()
 
             # Build forward kwargs
             kwargs = {
@@ -182,12 +187,18 @@ class InterGNNTrainer:
                 batch=batch_data.batch,
             )
 
-            losses["total"].backward()
-            if self.config.training.gradient_clip > 0:
-                nn.utils.clip_grad_norm_(
-                    self.model.parameters(), self.config.training.gradient_clip
-                )
-            optimizer.step()
+            # Scale loss for gradient accumulation
+            scaled_loss = losses["total"] / acc_steps
+            scaled_loss.backward()
+            
+            # Step optimizer every `acc_steps` batches or on the last batch
+            if (num_batches + 1) % acc_steps == 0 or (num_batches + 1) == len(loader):
+                if self.config.training.gradient_clip > 0:
+                    nn.utils.clip_grad_norm_(
+                        self.model.parameters(), self.config.training.gradient_clip
+                    )
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
 
             total_loss += losses["total"].item()
             for k, v in losses.items():
@@ -204,6 +215,7 @@ class InterGNNTrainer:
     def _eval_epoch(self, loader) -> Dict:
         self.model.eval()
         total_loss = 0.0
+        pred_loss_total = 0.0
         all_preds, all_targets = [], []
         num_batches = 0
 
@@ -226,6 +238,8 @@ class InterGNNTrainer:
             # Loss is computed on raw logits (head now always returns logits)
             losses = self.loss_fn(output, batch_data.y)
             total_loss += losses["total"].item()
+            # Track prediction loss separately for early stopping / checkpointing
+            pred_loss_total += losses["prediction"].item()
 
             # Apply sigmoid/softmax for metric-ready predictions
             pred = output["prediction"]
@@ -237,7 +251,8 @@ class InterGNNTrainer:
             num_batches += 1
 
         return {
-            "val_loss": total_loss / max(num_batches, 1),
+            "val_loss": pred_loss_total / max(num_batches, 1),
+            "val_total_loss": total_loss / max(num_batches, 1),
             "predictions": torch.cat(all_preds, dim=0),
             "targets": torch.cat(all_targets, dim=0),
         }
@@ -257,9 +272,14 @@ class InterGNNTrainer:
         scheduler = self._build_scheduler(optimizer, self.config.training.pretrain_epochs)
         early_stop = EarlyStopping(patience=self.config.training.early_stopping_patience)
         ckpt = ModelCheckpoint(self.config.training.checkpoint_dir, "pretrain")
+        
+        # Accumulate gradients specifically for the Davis dataset
+        # We accumulate 2 steps with batch size 8 = effective batch size 16
+        is_davis = getattr(self.config.data, "dataset_name", "") == "davis"
+        acc_steps = 2 if is_davis else 1
 
         for epoch in range(1, self.config.training.pretrain_epochs + 1):
-            train_metrics = self._train_epoch(train_loader, optimizer, "pretrain")
+            train_metrics = self._train_epoch(train_loader, optimizer, "pretrain", accumulation_steps=acc_steps)
             val_metrics = self._eval_epoch(val_loader) if val_loader else {}
 
             val_loss = val_metrics.get("val_loss", train_metrics["epoch_total"])
@@ -294,9 +314,12 @@ class InterGNNTrainer:
         scheduler = self._build_scheduler(optimizer, self.config.training.finetune_epochs)
         early_stop = EarlyStopping(patience=self.config.training.early_stopping_patience)
         ckpt = ModelCheckpoint(self.config.training.checkpoint_dir, "finetune")
+        
+        is_davis = getattr(self.config.data, "dataset_name", "") == "davis"
+        acc_steps = 2 if is_davis else 1
 
         for epoch in range(1, self.config.training.finetune_epochs + 1):
-            train_metrics = self._train_epoch(train_loader, optimizer, "finetune")
+            train_metrics = self._train_epoch(train_loader, optimizer, "finetune", accumulation_steps=acc_steps)
             val_metrics = self._eval_epoch(val_loader) if val_loader else {}
 
             val_loss = val_metrics.get("val_loss", train_metrics["epoch_total"])

@@ -41,7 +41,8 @@ def deletion_auc(
     # Get baseline prediction
     with torch.no_grad():
         base_out = model(data.x, data.edge_index, data.edge_attr, batch)
-        base_pred = base_out["prediction"].cpu().numpy().flatten()
+        # Apply sigmoid to push predictions into a [0, 1] probability range
+        base_pred = torch.sigmoid(base_out["prediction"]).cpu().numpy().flatten()
 
     # Sort atoms by importance (descending)
     sorted_idx = torch.argsort(node_importance, descending=True)
@@ -61,7 +62,7 @@ def deletion_auc(
 
         with torch.no_grad():
             out = model(x_masked, data.edge_index, data.edge_attr, batch)
-            pred = out["prediction"].cpu().numpy().flatten()
+            pred = torch.sigmoid(out["prediction"]).cpu().numpy().flatten()
 
         predictions.append(pred)
         fractions.append(end / n)
@@ -96,7 +97,8 @@ def insertion_auc(
     # Get target prediction
     with torch.no_grad():
         target_out = model(data.x, data.edge_index, data.edge_attr, batch)
-        target_pred = target_out["prediction"].cpu().numpy().flatten()
+        # Apply sigmoid to push predictions into a [0, 1] probability range
+        target_pred = torch.sigmoid(target_out["prediction"]).cpu().numpy().flatten()
 
     # Sort by importance (descending)
     sorted_idx = torch.argsort(node_importance, descending=True)
@@ -116,7 +118,7 @@ def insertion_auc(
 
         with torch.no_grad():
             out = model(x_inserted, data.edge_index, data.edge_attr, batch)
-            pred = out["prediction"].cpu().numpy().flatten()
+            pred = torch.sigmoid(out["prediction"]).cpu().numpy().flatten()
 
         predictions.append(pred)
         fractions.append(end / n)
