@@ -8,9 +8,9 @@
   <img src="https://img.shields.io/badge/python-3.9%2B-blue" alt="Python 3.9+">
   <img src="https://img.shields.io/badge/PyTorch-2.0%2B-red" alt="PyTorch">
   <img src="https://img.shields.io/badge/PyG-2.4%2B-orange" alt="PyG">
-  <img src="https://img.shields.io/pypi/v/inter-gnn?color=green" alt="PyPI">
-  <img src="https://img.shields.io/badge/License-MIT-green" alt="License: MIT">
 </p>
+
+*This repository contains the codebase for a B.Tech Final Year Project focusing on interpretability in Graph Neural Networks for drug-target interaction and molecular property prediction.*
 
 ---
 
@@ -92,7 +92,7 @@ The framework supports both **molecular property prediction** (e.g., toxicity, s
 | **Explainers** | CF-GNNExplainer | Counterfactual explanations via minimal edge perturbation that flips predictions |
 | | T-GNNExplainer | Sufficient subgraph identification preserving original predictions |
 | | CIDER Diagnostics | Causal invariance testing across data environments |
-| **Data** | 9 Benchmark Datasets | MUTAG, Tox21, ClinTox, QM9, Davis, KIBA, BindingDB, SIDER, SynLethDB |
+| **Data** | 6 Benchmark Datasets | MUTAG, Tox21, ClinTox, QM9, Davis, SIDER |
 | | Molecule Standardization | Tautomer canonicalization, charge neutralization, stereo handling, InChIKey deduplication |
 | | Activity Cliff Detection | Fingerprint similarity-based cliff pair identification and tagging |
 | | Splitting Strategies | Scaffold, cold-target, cold-drug, temporal, and stratified random splits |
@@ -169,18 +169,12 @@ The framework supports both **molecular property prediction** (e.g., toxicity, s
 
 ## Installation
 
-### From PyPI
-
-```bash
-pip install inter-gnn
-```
-
-### From Source (Development)
+### From Source
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/Inter_gnn.git
-cd Inter_gnn
+git clone https://github.com/HarshalLoya/InterGNN.git
+cd InterGNN
 
 # Install in editable mode with all extras
 pip install -e ".[vis,dev]"
@@ -203,7 +197,7 @@ pip install -e ".[vis,dev]"
 | `pyyaml` | ≥ 6.0 | YAML configuration parsing |
 | `tqdm` | ≥ 4.65.0 | Progress bars |
 
-#### Optional Visualization (`pip install inter-gnn[vis]`)
+#### Optional Visualization (`pip install -e ".[vis]"`)
 
 | Package | Purpose |
 |---------|---------|
@@ -212,7 +206,7 @@ pip install -e ".[vis,dev]"
 | `seaborn` | Statistical plotting |
 | `ipywidgets` | Jupyter widget support |
 
-#### Development (`pip install inter-gnn[dev]`)
+#### Development (`pip install -e ".[dev]"`)
 
 | Package | Purpose |
 |---------|---------|
@@ -695,10 +689,7 @@ Unified loader interface for 9 benchmark datasets:
 | ClinTox | Mol. Classification | 2 | MoleculeNet |
 | QM9 | Mol. Regression | 19 | MoleculeNet |
 | Davis | DTA Regression | 1 | TDC |
-| KIBA | DTA Regression | 1 | TDC |
-| BindingDB | DTA Regression | 1 | TDC |
 | SIDER | Mol. Classification | 27 | MoleculeNet |
-| SynLethDB | Link Prediction | 1 | Custom |
 
 #### `datamodule.py` — DataModule Wrapper
 
