@@ -1,8 +1,8 @@
 """
 Dataset loaders for all benchmark datasets.
 
-Provides unified loading interface for MUTAG, Tox21, ClinTox, QM9,
-Davis, KIBA, BindingDB, SIDER, and SynLethDB datasets.
+Provides unified loading interface for MUTAG, Tox21, ClinTox, SIDER, 
+BBBP, BACE, HIV, OGBG-MolHIV, BindingDB, and SynLethDB datasets.
 """
 
 from __future__ import annotations
@@ -92,14 +92,19 @@ def load_clintox(data_dir=None):
     return _load_pyg_moleculenet("ClinTox", data_dir or os.path.join(DEFAULT_DATA_DIR, "ClinTox"), 2)
 
 
-def load_qm9(data_dir=None):
-    """Load QM9 (~134k molecules, 19 properties)."""
-    from torch_geometric.datasets import QM9
-    root = data_dir or os.path.join(DEFAULT_DATA_DIR, "QM9"); _ensure_dir(root)
-    ds = QM9(root=root)
-    data_list = [ds[i] for i in range(len(ds))]
-    for i, d in enumerate(data_list): d.idx = i
-    return InterGNNDataset(data_list, "QM9", "regression", 19)
+def load_bbbp(data_dir=None):
+    """Load BBBP (Blood-Brain Barrier Permeability)."""
+    return _load_pyg_moleculenet("BBBP", data_dir or os.path.join(DEFAULT_DATA_DIR, "BBBP"), 1)
+
+
+def load_bace(data_dir=None):
+    """Load BACE (Inhibitors of human beta-secretase 1)."""
+    return _load_pyg_moleculenet("BACE", data_dir or os.path.join(DEFAULT_DATA_DIR, "BACE"), 1)
+
+
+def load_hiv(data_dir=None):
+    """Load HIV (Inhibition of HIV replication)."""
+    return _load_pyg_moleculenet("HIV", data_dir or os.path.join(DEFAULT_DATA_DIR, "HIV"), 1)
 
 
 def load_sider(data_dir=None):
@@ -161,16 +166,27 @@ def _load_tdc_dti(name, data_dir):
     return df["Drug"].tolist(), df["Target"].tolist(), df["Y"].tolist()
 
 
-def load_davis(data_dir=None):
-    """Load Davis (kinase inhibitors, ~30k pairs)."""
-    s, t, a = _load_tdc_dti("DAVIS", data_dir)
-    return _build_dta_dataset(s, t, a, "Davis")
-
-
-def load_kiba(data_dir=None):
-    """Load KIBA (integrated kinase bioactivity, ~118k pairs)."""
-    s, t, a = _load_tdc_dti("KIBA", data_dir)
-    return _build_dta_dataset(s, t, a, "KIBA")
+def load_ogbg_molhiv(data_dir=None):
+    """Load OGBG-MolHIV dataset via ogb.graphproppred."""
+    try:
+        from ogb.graphproppred import PygGraphPropPredDataset
+    except ImportError:
+        logger.warning("ogb not installed. Falling back to MoleculeNet HIV.")
+        return load_hiv(data_dir)
+        
+    root = data_dir or os.path.join(DEFAULT_DATA_DIR, "ogbg_molhiv"); _ensure_dir(root)
+    dataset = PygGraphPropPredDataset(name="ogbg-molhiv", root=root)
+    data_list, smiles_list = [], []
+    # OGB datasets don't give smiles natively via data object but we can just use the graph objects
+    for i in range(len(dataset)):
+        d = dataset[i]
+        d.idx = i
+        # Convert y to float32 for BCEWithLogitsLoss
+        d.y = d.y.to(torch.float32)
+        data_list.append(d)
+        
+    logger.info(f"Loaded ogbg-molhiv: {len(data_list)} molecules")
+    return InterGNNDataset(data_list, "ogbg_molhiv", "classification", 1)
 
 
 def load_bindingdb(data_dir=None, affinity_type="Kd", max_records=None):
@@ -211,8 +227,9 @@ def load_synlethdb(data_dir=None):
 
 DATASET_REGISTRY = {
     "mutag": load_mutag, "tox21": load_tox21, "clintox": load_clintox,
-    "qm9": load_qm9, "davis": load_davis, "kiba": load_kiba,
-    "bindingdb": load_bindingdb, "sider": load_sider, "synlethdb": load_synlethdb,
+    "sider": load_sider, "bbbp": load_bbbp, "bace": load_bace,
+    "hiv": load_hiv, "ogbg_molhiv": load_ogbg_molhiv,
+    "bindingdb": load_bindingdb, "synlethdb": load_synlethdb,
 }
 
 
@@ -222,7 +239,7 @@ def list_datasets() -> List[str]:
 
 
 def load_dataset(name: str, data_dir=None, **kwargs) -> InterGNNDataset:
-    """Unified loader. name: mutag/tox21/clintox/qm9/davis/kiba/bindingdb/sider/synlethdb."""
+    """Unified loader for classification benchmarks."""
     key = name.lower()
     if key not in DATASET_REGISTRY:
         raise ValueError(f"Unknown dataset '{name}'. Available: {sorted(DATASET_REGISTRY)}")

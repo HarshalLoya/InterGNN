@@ -65,16 +65,11 @@ class InterGNNTrainer:
         self.model = InterGNN(
             atom_feat_dim=config.model.atom_feat_dim,
             bond_feat_dim=config.model.bond_feat_dim,
-            residue_feat_dim=config.model.residue_feat_dim,
             hidden_dim=config.model.hidden_dim,
             num_mol_layers=config.model.num_mol_layers,
-            num_target_layers=config.model.num_target_layers,
-            num_attn_heads=config.model.num_attn_heads,
             task_type=config.model.task_type,
             num_tasks=config.model.num_tasks,
             dropout=config.model.dropout,
-            use_target=config.model.use_target,
-            fusion_type=config.model.fusion_type,
             readout=config.model.readout,
         ).to(self.device)
 

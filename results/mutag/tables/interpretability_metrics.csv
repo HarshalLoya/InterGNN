@@ -1,2 +1,0 @@
-dataset,deletion_auc,insertion_auc,jaccard_stability,chemical_validity
-mutag,0.048693898051122245,0.7892303524058711,0.7407407407407407,1.0

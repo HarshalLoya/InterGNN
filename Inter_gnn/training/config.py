@@ -38,16 +38,11 @@ class DataConfig:
 class ModelConfig:
     atom_feat_dim: int = 55
     bond_feat_dim: int = 14
-    residue_feat_dim: int = 42
     hidden_dim: int = 256
     num_mol_layers: int = 4
-    num_target_layers: int = 3
-    num_attn_heads: int = 4
     task_type: str = "classification"
     num_tasks: int = 1
     dropout: float = 0.2
-    use_target: bool = False
-    fusion_type: str = "cross_attention"
     readout: str = "attention"
 
 

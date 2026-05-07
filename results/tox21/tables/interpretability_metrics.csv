@@ -1,2 +1,0 @@
-dataset,deletion_auc,insertion_auc,jaccard_stability,chemical_validity
-tox21,0.043984940353954165,0.8644632142401542,0.8507936507936508,1.0

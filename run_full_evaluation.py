@@ -15,7 +15,7 @@ Usage:
     python run_full_evaluation.py --datasets mutag tox21
 """
 from __future__ import annotations
-import argparse, copy, csv, json, logging, os, sys, time, warnings
+import argparse, copy, csv, json, logging, os, sys, time, warnings, gc, shutil
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -27,7 +27,7 @@ import matplotlib.gridspec as gridspec
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GCNConv, GINConv, global_mean_pool, global_add_pool
+from torch_geometric.nn import GCNConv, GINConv, GATConv, NNConv, global_mean_pool, global_add_pool
 from torch_geometric.loader import DataLoader
 from scipy.stats import ttest_rel
 
@@ -43,7 +43,7 @@ from inter_gnn.training.config import (
     InterpretabilityConfig, LossConfig, TrainingConfig,
 )
 from inter_gnn.evaluation.predictive import (
-    compute_classification_metrics, compute_regression_metrics,
+    compute_classification_metrics,
 )
 from inter_gnn.evaluation.faithfulness import deletion_auc, insertion_auc
 from inter_gnn.evaluation.stability_metrics import jaccard_stability
@@ -88,19 +88,25 @@ MUTAG_SMILES = [
 DATASET_CONFIGS = {
     "mutag": {"task_type": "classification", "num_tasks": 1, "split_method": "random",
               "batch_size": 32, "hidden_dim": 128, "num_mol_layers": 3,
-              "pretrain_epochs": 30, "finetune_epochs": 30, "use_target": False},
+              "pretrain_epochs": 30, "finetune_epochs": 30},
     "tox21": {"task_type": "classification", "num_tasks": 12, "split_method": "scaffold",
               "batch_size": 64, "hidden_dim": 256, "num_mol_layers": 4,
-              "pretrain_epochs": 30, "finetune_epochs": 30, "use_target": False},
-    "qm9":   {"task_type": "regression", "num_tasks": 1, "split_method": "random",
-              "batch_size": 128, "hidden_dim": 256, "num_mol_layers": 5,
-              "pretrain_epochs": 30, "finetune_epochs": 30, "use_target": False},
-    "davis": {"task_type": "regression", "num_tasks": 1, "split_method": "scaffold",
-              "batch_size": 8, "hidden_dim": 256, "num_mol_layers": 4,
-              "pretrain_epochs": 8, "finetune_epochs": 8, "use_target": True},
-    "kiba":  {"task_type": "regression", "num_tasks": 1, "split_method": "scaffold",
-              "batch_size": 32, "hidden_dim": 256, "num_mol_layers": 4,
-              "pretrain_epochs": 30, "finetune_epochs": 30, "use_target": True},
+              "pretrain_epochs": 30, "finetune_epochs": 30},
+    "clintox": {"task_type": "classification", "num_tasks": 2, "split_method": "scaffold",
+              "batch_size": 64, "hidden_dim": 256, "num_mol_layers": 4,
+              "pretrain_epochs": 30, "finetune_epochs": 30},
+    "sider": {"task_type": "classification", "num_tasks": 27, "split_method": "scaffold",
+              "batch_size": 64, "hidden_dim": 256, "num_mol_layers": 4,
+              "pretrain_epochs": 30, "finetune_epochs": 30},
+    "bbbp": {"task_type": "classification", "num_tasks": 1, "split_method": "scaffold",
+              "batch_size": 64, "hidden_dim": 256, "num_mol_layers": 4,
+              "pretrain_epochs": 30, "finetune_epochs": 30},
+    "bace": {"task_type": "classification", "num_tasks": 1, "split_method": "scaffold",
+              "batch_size": 64, "hidden_dim": 256, "num_mol_layers": 4,
+              "pretrain_epochs": 30, "finetune_epochs": 30},
+    "hiv": {"task_type": "classification", "num_tasks": 1, "split_method": "scaffold",
+              "batch_size": 64, "hidden_dim": 256, "num_mol_layers": 4,
+              "pretrain_epochs": 30, "finetune_epochs": 30},
 }
 
 
@@ -149,6 +155,141 @@ class GINBaseline(nn.Module):
         return self.head(x)
 
 
+class GATBaseline(nn.Module):
+    """3-layer GAT baseline for graph classification."""
+    def __init__(self, input_dim, hidden_dim=128, num_tasks=1, task_type="classification", dropout=0.2, heads=4):
+        super().__init__()
+        self.task_type = task_type
+        self.conv1 = GATConv(input_dim, hidden_dim // heads, heads=heads, dropout=dropout)
+        self.conv2 = GATConv(hidden_dim, hidden_dim // heads, heads=heads, dropout=dropout)
+        self.conv3 = GATConv(hidden_dim, hidden_dim, heads=1, concat=False, dropout=dropout)
+        self.dropout = nn.Dropout(dropout)
+        self.head = nn.Sequential(nn.Linear(hidden_dim, hidden_dim // 2), nn.ReLU(),
+                                  nn.Dropout(dropout), nn.Linear(hidden_dim // 2, num_tasks))
+
+    def forward(self, x, edge_index, edge_attr, batch):
+        x = x.float()
+        x = F.elu(self.conv1(x, edge_index)); x = self.dropout(x)
+        x = F.elu(self.conv2(x, edge_index)); x = self.dropout(x)
+        x = self.conv3(x, edge_index)
+        x = global_mean_pool(x, batch)
+        return self.head(x)
+
+
+class MPNNBaseline(nn.Module):
+    """Message-Passing Neural Network baseline using NNConv with edge features."""
+    def __init__(self, input_dim, hidden_dim=128, num_tasks=1, task_type="classification", dropout=0.2, edge_dim=14):
+        super().__init__()
+        self.task_type = task_type
+        self.lin0 = nn.Linear(input_dim, hidden_dim)
+        edge_nn1 = nn.Sequential(nn.Linear(edge_dim, hidden_dim * hidden_dim))
+        edge_nn2 = nn.Sequential(nn.Linear(edge_dim, hidden_dim * hidden_dim))
+        self.conv1 = NNConv(hidden_dim, hidden_dim, edge_nn1, aggr='mean')
+        self.conv2 = NNConv(hidden_dim, hidden_dim, edge_nn2, aggr='mean')
+        self.dropout = nn.Dropout(dropout)
+        self.head = nn.Sequential(nn.Linear(hidden_dim, hidden_dim // 2), nn.ReLU(),
+                                  nn.Dropout(dropout), nn.Linear(hidden_dim // 2, num_tasks))
+
+    def forward(self, x, edge_index, edge_attr, batch):
+        x = x.float()
+        x = F.relu(self.lin0(x))
+        if edge_attr is not None:
+            edge_attr = edge_attr.float()
+            x = F.relu(self.conv1(x, edge_index, edge_attr)); x = self.dropout(x)
+            x = F.relu(self.conv2(x, edge_index, edge_attr))
+        else:
+            # Fallback: skip NNConv if no edge features
+            x = self.dropout(x)
+        x = global_mean_pool(x, batch)
+        return self.head(x)
+
+
+class AttentiveFPBaseline(nn.Module):
+    """AttentiveFP baseline using PyG's AttentiveFP model."""
+    def __init__(self, input_dim, hidden_dim=128, num_tasks=1, task_type="classification", dropout=0.2, edge_dim=14):
+        super().__init__()
+        self.task_type = task_type
+        try:
+            from torch_geometric.nn.models import AttentiveFP as _AttentiveFP
+            self.model = _AttentiveFP(
+                in_channels=input_dim, hidden_channels=hidden_dim,
+                out_channels=num_tasks, edge_dim=edge_dim,
+                num_layers=3, num_timesteps=2, dropout=dropout,
+            )
+            self._has_attfp = True
+        except ImportError:
+            # Fallback to simple GIN if AttentiveFP not available
+            logger.warning("AttentiveFP not available in this PyG version, falling back to GIN.")
+            self._has_attfp = False
+            self.conv1 = GINConv(nn.Sequential(nn.Linear(input_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, hidden_dim)))
+            self.conv2 = GINConv(nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, hidden_dim)))
+            self.dropout_layer = nn.Dropout(dropout)
+            self.head = nn.Sequential(nn.Linear(hidden_dim, hidden_dim // 2), nn.ReLU(),
+                                      nn.Dropout(dropout), nn.Linear(hidden_dim // 2, num_tasks))
+
+    def forward(self, x, edge_index, edge_attr, batch):
+        x = x.float()
+        if self._has_attfp:
+            if edge_attr is not None:
+                edge_attr = edge_attr.float()
+            return self.model(x, edge_index, edge_attr, batch)
+        else:
+            x = F.relu(self.conv1(x, edge_index)); x = self.dropout_layer(x)
+            x = F.relu(self.conv2(x, edge_index))
+            x = global_add_pool(x, batch)
+            return self.head(x)
+
+
+# ── GNNExplainer Interpretability Baseline ──
+def run_gnnexplainer_baseline(model, test_loader, device, num_samples=15):
+    """Run GNNExplainer on a trained baseline model and return explanation metrics."""
+    try:
+        from torch_geometric.explain import Explainer, GNNExplainer
+        explainer = Explainer(
+            model=model,
+            algorithm=GNNExplainer(epochs=100, lr=0.01),
+            explanation_type='model',
+            node_mask_type='attributes',
+            edge_mask_type='object',
+            model_config=dict(mode='binary_classification', task_level='graph', return_type='raw'),
+        )
+    except (ImportError, Exception) as e:
+        logger.warning(f"GNNExplainer unavailable: {e}")
+        return {"gnnexplainer_available": False}
+
+    model.eval()
+    fidelity_scores = []
+    count = 0
+    for batch_data in test_loader:
+        if count >= num_samples:
+            break
+        batch_data = batch_data.to(device)
+        # GNNExplainer works on single graphs
+        for i in range(batch_data.num_graphs):
+            if count >= num_samples:
+                break
+            try:
+                data_i = batch_data.get_example(i) if hasattr(batch_data, 'get_example') else batch_data
+                explanation = explainer(data_i.x, data_i.edge_index,
+                                       edge_attr=data_i.edge_attr,
+                                       batch=torch.zeros(data_i.x.size(0), dtype=torch.long, device=device))
+                if hasattr(explanation, 'node_mask') and explanation.node_mask is not None:
+                    fidelity_scores.append(float(explanation.node_mask.mean()))
+                count += 1
+            except Exception:
+                count += 1
+
+    return {
+        "gnnexplainer_available": True,
+        "mean_node_mask_density": float(np.mean(fidelity_scores)) if fidelity_scores else 0.0,
+        "num_explained": len(fidelity_scores),
+    }
+
+
+# ── Multi-Seed Constants ──
+SEEDS = [42, 123, 456, 789, 999]
+
+
 def train_baseline(model, train_loader, val_loader, task_type, num_epochs=30, lr=1e-3, device="cpu"):
     """Train a baseline model and return per-sample test predictions."""
     model = model.to(device)
@@ -167,7 +308,15 @@ def train_baseline(model, train_loader, val_loader, task_type, num_epochs=30, lr
                 target = target[:, :out.shape[1]]
             valid = ~torch.isnan(target)
             if valid.any():
-                loss = loss_fn(out[valid], target[valid].float())
+                if task_type == "classification":
+                    p_mask = out[valid]
+                    t_mask = target[valid].float()
+                    n_pos = torch.clamp((t_mask == 1).sum().float(), min=1.0)
+                    n_neg = (t_mask == 0).sum().float()
+                    pos_w = torch.clamp(n_neg / n_pos, min=1.0, max=20.0)
+                    loss = F.binary_cross_entropy_with_logits(p_mask, t_mask, pos_weight=pos_w)
+                else:
+                    loss = loss_fn(out[valid], target[valid].float())
                 loss.backward(); optimizer.step()
     return model
 
@@ -204,7 +353,6 @@ def build_config(ds_name, quick=False):
     config.model.num_mol_layers = ds["num_mol_layers"]
     config.model.task_type = ds["task_type"]
     config.model.num_tasks = ds["num_tasks"]
-    config.model.use_target = ds["use_target"]
     config.model.dropout = 0.2
     config.interpretability.use_prototypes = True
     config.interpretability.use_motifs = True
@@ -264,32 +412,28 @@ def _pub_style():
 
 
 def plot_performance_comparison(ds_name, metrics_dict, plots_dir, task_type):
-    """Bar chart: InterGNN vs GCN vs GIN."""
+    """Bar chart: InterGNN vs all baselines."""
     _pub_style()
-    if task_type == "classification":
-        keys = ["roc_auc", "pr_auc", "accuracy", "f1_score", "mcc"]
-        labels = ["ROC-AUC", "PR-AUC", "Accuracy", "F1", "MCC"]
-    else:
-        keys = ["rmse", "mae", "r2", "pearson_r", "ci"]
-        labels = ["RMSE", "MAE", "R²", "Pearson r", "CI"]
+    keys = ["roc_auc", "pr_auc", "accuracy", "f1_score", "mcc"]
+    labels = ["ROC-AUC", "PR-AUC", "Accuracy", "F1", "MCC"]
 
     model_names = list(metrics_dict.keys())
-    fig, ax = plt.subplots(figsize=(12, 5))
+    fig, ax = plt.subplots(figsize=(max(12, len(model_names) * 2), 5))
     x = np.arange(len(keys))
     w = 0.8 / len(model_names)
-    colors = [COLORS["intergnn"], COLORS["gcn"], COLORS["gin"]]
+    palette = ["#2563EB", "#DC2626", "#059669", "#7C3AED", "#D97706", "#0891B2", "#DB2777", "#65A30D"]
 
     for i, mn in enumerate(model_names):
         vals = [metrics_dict[mn].get(k, 0) for k in keys]
         offset = (i - len(model_names) / 2 + 0.5) * w
-        bars = ax.bar(x + offset, vals, w, label=mn, color=colors[i % 3], edgecolor="white", lw=0.5)
+        bars = ax.bar(x + offset, vals, w, label=mn, color=palette[i % len(palette)], edgecolor="white", lw=0.5)
         for bar, v in zip(bars, vals):
             ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
-                    f"{v:.3f}", ha="center", va="bottom", fontsize=7, rotation=45)
+                    f"{v:.3f}", ha="center", va="bottom", fontsize=6, rotation=45)
 
     ax.set_xticks(x); ax.set_xticklabels(labels, fontweight="bold")
     ax.set_ylabel("Score"); ax.set_title(f"Performance Comparison — {ds_name.upper()}", fontweight="bold")
-    ax.legend(framealpha=0.9)
+    ax.legend(framealpha=0.9, fontsize=8, ncol=2)
     fig.tight_layout()
     path = os.path.join(plots_dir, f"performance_comparison_{ds_name}.png")
     fig.savefig(path, dpi=PLOT_DPI); plt.close(fig)
@@ -567,47 +711,120 @@ def run_dataset_evaluation(ds_name, output_dir, quick=False):
                 f"val={len(dm.split_indices['val'])}, test={len(dm.split_indices['test'])}, "
                 f"atom_dim={atom_dim}")
 
-    # ── 2. Train InterGNN ──
-    logger.info(f"[{ds_name}] Training InterGNN...")
-    config = build_config(ds_name, quick=quick)
-    config.model.atom_feat_dim = atom_dim; config.model.bond_feat_dim = bond_dim
-    config.training.checkpoint_dir = os.path.join(output_dir, "checkpoints", ds_name)
-    trainer = InterGNNTrainer(config)
-    t0 = time.time(); trainer.fit(train_loader, val_loader)
-    logger.info(f"[{ds_name}] InterGNN trained in {time.time()-t0:.0f}s")
+    # ── 2. Train InterGNN (multi-seed) ──
+    logger.info(f"[{ds_name}] Training InterGNN across {len(SEEDS)} seeds...")
+    ig_seed_metrics = []
+    best_trainer = None
+    best_ig_preds, best_ig_targets = None, None
+    for seed_i, seed_val in enumerate(SEEDS):
+        logger.info(f"[{ds_name}] InterGNN seed {seed_i+1}/{len(SEEDS)} (seed={seed_val})")
+        torch.manual_seed(seed_val); np.random.seed(seed_val)
+        if torch.cuda.is_available(): torch.cuda.manual_seed_all(seed_val)
+        config = build_config(ds_name, quick=quick)
+        config.model.atom_feat_dim = atom_dim; config.model.bond_feat_dim = bond_dim
+        config.training.checkpoint_dir = os.path.join(output_dir, "checkpoints", ds_name, f"seed_{seed_val}")
+        config.training.seed = seed_val
+        config.data.seed = seed_val
+        trainer = InterGNNTrainer(config)
+        t0 = time.time(); trainer.fit(train_loader, val_loader)
+        logger.info(f"[{ds_name}] InterGNN seed {seed_val} trained in {time.time()-t0:.0f}s")
 
-    eval_res = trainer._eval_epoch(test_loader)
-    ig_preds = eval_res["predictions"].numpy()
-    ig_targets = eval_res["targets"].numpy()
-    if ig_preds.ndim == 1: ig_preds = ig_preds.reshape(-1, 1)
-    if ig_targets.ndim == 1: ig_targets = ig_targets.reshape(-1, 1)
-    ig_metrics = compute_classification_metrics(ig_preds, ig_targets) if task_type == "classification" \
-        else compute_regression_metrics(ig_preds, ig_targets)
-    logger.info(f"[{ds_name}] InterGNN metrics: {ig_metrics}")
+        eval_res = trainer._eval_epoch(test_loader)
+        ig_preds = eval_res["predictions"].numpy()
+        ig_targets = eval_res["targets"].numpy()
+        if ig_preds.ndim == 1: ig_preds = ig_preds.reshape(-1, 1)
+        if ig_targets.ndim == 1: ig_targets = ig_targets.reshape(-1, 1)
+        m = compute_classification_metrics(ig_preds, ig_targets)
+        if m["roc_auc"] == 0.0 and len(ig_targets) > 0:
+            logger.warning(f"[{ds_name}] InterGNN seed {seed_val} returned 0.0 ROC-AUC. Targets unique: {np.unique(ig_targets[~np.isnan(ig_targets)])}")
+        
+        ig_seed_metrics.append(m)
+        if seed_val == SEEDS[0]:  # keep first seed trainer for interpretability eval
+            best_trainer = trainer
+            best_ig_preds, best_ig_targets = ig_preds, ig_targets
+        
+        # Cleanup trainer to save memory
+        if seed_val != SEEDS[0]:
+            del trainer
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
 
-    # ── 3. Train Baselines ──
+    trainer = best_trainer  # used later for interpretability
+    ig_preds, ig_targets = best_ig_preds, best_ig_targets
+
+    # Aggregate InterGNN metrics across seeds
+    ig_metrics = {}
+    ig_metrics_std = {}
+    for key in ig_seed_metrics[0].keys():
+        vals = [m[key] for m in ig_seed_metrics]
+        ig_metrics[key] = float(np.mean(vals))
+        ig_metrics_std[key] = float(np.std(vals))
+    logger.info(f"[{ds_name}] InterGNN mean metrics (5 seeds): {ig_metrics}")
+    logger.info(f"[{ds_name}] InterGNN std  metrics (5 seeds): {ig_metrics_std}")
+
+    # ── 3. Train Baselines (multi-seed) ──
     n_epochs = 2 if quick else ds_cfg["pretrain_epochs"]
     hidden = ds_cfg["hidden_dim"]
 
-    logger.info(f"[{ds_name}] Training GCN baseline...")
-    gcn = GCNBaseline(atom_dim, hidden, ds_cfg["num_tasks"], task_type)
-    gcn = train_baseline(gcn, train_loader, val_loader, task_type, n_epochs, device=str(device))
-    gcn_preds, gcn_targets = eval_baseline(gcn, test_loader, task_type, str(device))
-    gcn_metrics = compute_classification_metrics(gcn_preds, gcn_targets) if task_type == "classification" \
-        else compute_regression_metrics(gcn_preds, gcn_targets)
-    logger.info(f"[{ds_name}] GCN metrics: {gcn_metrics}")
+    baseline_classes = {
+        "GCN": lambda: GCNBaseline(atom_dim, hidden, ds_cfg["num_tasks"], task_type),
+        "GIN": lambda: GINBaseline(atom_dim, hidden, ds_cfg["num_tasks"], task_type),
+        "GAT": lambda: GATBaseline(atom_dim, hidden, ds_cfg["num_tasks"], task_type),
+        "MPNN": lambda: MPNNBaseline(atom_dim, hidden, ds_cfg["num_tasks"], task_type, edge_dim=bond_dim),
+        "AttentiveFP": lambda: AttentiveFPBaseline(atom_dim, hidden, ds_cfg["num_tasks"], task_type, edge_dim=bond_dim),
+    }
 
-    logger.info(f"[{ds_name}] Training GIN baseline...")
-    gin = GINBaseline(atom_dim, hidden, ds_cfg["num_tasks"], task_type)
-    gin = train_baseline(gin, train_loader, val_loader, task_type, n_epochs, device=str(device))
-    gin_preds, gin_targets = eval_baseline(gin, test_loader, task_type, str(device))
-    gin_metrics = compute_classification_metrics(gin_preds, gin_targets) if task_type == "classification" \
-        else compute_regression_metrics(gin_preds, gin_targets)
-    logger.info(f"[{ds_name}] GIN metrics: {gin_metrics}")
+    all_baseline_metrics = {}
+    all_baseline_metrics_std = {}
+    # Keep predictions from first seed for hypothesis testing
+    first_seed_preds = {}
 
-    # Performance comparison plot
-    all_metrics = {"InterGNN": ig_metrics, "GCN": gcn_metrics, "GIN": gin_metrics}
+    for bl_name, bl_factory in baseline_classes.items():
+        logger.info(f"[{ds_name}] Training {bl_name} baseline ({len(SEEDS)} seeds)...")
+        bl_seed_metrics = []
+        for seed_i, seed_val in enumerate(SEEDS):
+            torch.manual_seed(seed_val); np.random.seed(seed_val)
+            if torch.cuda.is_available(): torch.cuda.manual_seed_all(seed_val)
+            model = bl_factory()
+            model = train_baseline(model, train_loader, val_loader, task_type, n_epochs, device=str(device))
+            preds, targets = eval_baseline(model, test_loader, task_type, str(device))
+            m = compute_classification_metrics(preds, targets)
+            if m["roc_auc"] == 0.0 and len(targets) > 0:
+                 logger.warning(f"[{ds_name}] {bl_name} seed {seed_val} returned 0.0 ROC-AUC. Targets unique: {np.unique(targets[~np.isnan(targets)])}")
+            bl_seed_metrics.append(m)
+            if seed_val == SEEDS[0]:
+                first_seed_preds[bl_name] = (preds, targets)
+                # Run GNNExplainer on the first-seed GCN for interpretability comparison
+                if bl_name == "GCN":
+                    logger.info(f"[{ds_name}] Running GNNExplainer on GCN baseline...")
+                    gnnexp_results = run_gnnexplainer_baseline(model, test_loader, device)
+            
+            # Cleanup baseline model
+            del model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+        # Aggregate
+        bl_mean = {}
+        bl_std = {}
+        for key in bl_seed_metrics[0].keys():
+            vals = [m[key] for m in bl_seed_metrics]
+            bl_mean[key] = float(np.mean(vals))
+            bl_std[key] = float(np.std(vals))
+        all_baseline_metrics[bl_name] = bl_mean
+        all_baseline_metrics_std[bl_name] = bl_std
+        logger.info(f"[{ds_name}] {bl_name} mean: {bl_mean}")
+
+    # Convenience aliases for hypothesis testing (use first-seed preds)
+    gcn_preds, gcn_targets = first_seed_preds.get("GCN", (ig_preds, ig_targets))
+
+    # Performance comparison (include all models with mean ± std)
+    all_metrics = {"InterGNN": ig_metrics}
+    all_metrics.update(all_baseline_metrics)
     results["performance"] = all_metrics
+    results["performance_std"] = {"InterGNN": ig_metrics_std, **all_baseline_metrics_std}
+    results["gnnexplainer"] = gnnexp_results if 'gnnexp_results' in dir() else {}
     plot_performance_comparison(ds_name, all_metrics, plots_dir, task_type)
 
     # ── 4. Interpretability Evaluation ──
@@ -689,8 +906,7 @@ def run_dataset_evaluation(ds_name, output_dir, quick=False):
             t_rand = eval_rand["targets"].numpy()
             if p_rand.ndim == 1: p_rand = p_rand.reshape(-1, 1)
             if t_rand.ndim == 1: t_rand = t_rand.reshape(-1, 1)
-            rand_metrics = compute_classification_metrics(p_rand, t_rand) if task_type == "classification" \
-                else compute_regression_metrics(p_rand, t_rand)
+            rand_metrics = compute_classification_metrics(p_rand, t_rand)
 
             # Scaffold split (skip if smiles not available - use existing metrics)
             if dm.dataset.smiles_list:
@@ -708,8 +924,7 @@ def run_dataset_evaluation(ds_name, output_dir, quick=False):
                 t_scaf = eval_scaf["targets"].numpy()
                 if p_scaf.ndim == 1: p_scaf = p_scaf.reshape(-1, 1)
                 if t_scaf.ndim == 1: t_scaf = t_scaf.reshape(-1, 1)
-                scaf_metrics = compute_classification_metrics(p_scaf, t_scaf) if task_type == "classification" \
-                    else compute_regression_metrics(p_scaf, t_scaf)
+                scaf_metrics = compute_classification_metrics(p_scaf, t_scaf)
             else:
                 scaf_metrics = rand_metrics  # fallback
 
@@ -732,7 +947,7 @@ def run_dataset_evaluation(ds_name, output_dir, quick=False):
                 activities.append(float(d.y.flatten()[0]) if d.y is not None else 0.0)
             if len(activities) < len(smiles_list):
                 smiles_list = smiles_list[:len(activities)]
-            cliffs = find_cliff_pairs(smiles_list, activities, sim_threshold=0.5, act_threshold=0.5, max_pairs=20)
+            cliffs = find_cliff_pairs(smiles_list, activities, sim_threshold=0.5, act_threshold=0.5, max_pairs=8)
             if cliffs:
                 results["activity_cliffs"] = cliffs
                 for ci, cp in enumerate(cliffs):
@@ -955,6 +1170,19 @@ def main():
             logger.error(f"Unknown dataset: {ds}"); continue
         try:
             all_results[ds] = run_dataset_evaluation(ds, output_dir, quick=args.quick)
+        
+            # Cleanup checkpoints for this dataset to save disk space
+            ds_ckpt_dir = os.path.join(output_dir, "checkpoints", ds)
+            if os.path.exists(ds_ckpt_dir):
+                try:
+                    shutil.rmtree(ds_ckpt_dir)
+                    logger.info(f"Cleaned up checkpoints for {ds} to save disk space.")
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup checkpoints for {ds}: {e}")
+            
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
         except Exception as e:
             logger.error(f"Failed for {ds}: {e}", exc_info=True)
             all_results[ds] = {"dataset": ds, "task_type": DATASET_CONFIGS[ds]["task_type"], "error": str(e)}

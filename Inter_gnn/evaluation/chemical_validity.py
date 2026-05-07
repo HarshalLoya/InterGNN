@@ -7,7 +7,7 @@ correspond to chemically valid molecules.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 import numpy as np
 
@@ -132,3 +132,114 @@ def explanation_validity_report(
             report["logp_shift"] = float(np.mean(logp_values) - np.mean(orig_logp))
 
     return report
+
+
+# ── Known toxicophore / pharmacophore SMARTS ──
+TOXICOPHORE_SMARTS = {
+    "nitroaromatic": "[$(c1ccccc1[N+](=O)[O-]),$(c1ccccc1N(=O)=O)]",
+    "aromatic_amine": "[NX3;H2,H1;!$(NC=O)]c1ccccc1",
+    "epoxide": "C1OC1",
+    "michael_acceptor": "[CX3]=[CX3][CX3]=[OX1]",
+    "acyl_halide": "[CX3](=[OX1])[F,Cl,Br,I]",
+    "aldehyde": "[CX3H1](=O)[#6]",
+    "sulfonyl_halide": "[SX4](=[OX1])(=[OX1])[F,Cl,Br,I]",
+    "halogenated_aromatic": "c1ccccc1[F,Cl,Br,I]",
+    "phenol": "c1ccc(O)cc1",
+    "quinone": "O=C1C=CC(=O)C=C1",
+    "hydrazine": "[NX3][NX3]",
+    "isocyanate": "[NX2]=C=O",
+}
+
+
+def toxicophore_recovery_score(
+    smiles_list: List[str],
+    atom_importance_list: List[List[float]],
+    top_k_fraction: float = 0.3,
+    smarts_dict: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """
+    Measure how well the model's most important atoms overlap with known
+    toxicophoric / pharmacophoric substructures.
+
+    For each molecule that contains a toxicophore pattern, we compute the
+    fraction of pattern-matched atoms that fall within the model's top-K
+    most important atoms (precision) and the fraction of top-K atoms that
+    are pattern-matched (recall).
+
+    Args:
+        smiles_list: SMILES of molecules.
+        atom_importance_list: Per-atom importance scores (one list per molecule).
+        top_k_fraction: Fraction of atoms to consider as "important".
+        smarts_dict: Dict of {name: SMARTS} patterns. Defaults to TOXICOPHORE_SMARTS.
+
+    Returns:
+        Dict with per-pattern recovery rates and aggregate statistics.
+    """
+    if not HAS_RDKIT:
+        return {"error": "RDKit not available"}
+
+    patterns = smarts_dict or TOXICOPHORE_SMARTS
+    results = {"per_pattern": {}, "molecules_with_toxicophores": 0, "total_molecules": len(smiles_list)}
+    all_precisions = []
+    all_recalls = []
+
+    for smi, importance in zip(smiles_list, atom_importance_list):
+        mol = Chem.MolFromSmiles(smi)
+        if mol is None:
+            continue
+
+        n_atoms = mol.GetNumAtoms()
+        if len(importance) < n_atoms:
+            continue
+
+        # Determine top-K important atom indices
+        k = max(1, int(n_atoms * top_k_fraction))
+        imp_arr = np.array(importance[:n_atoms])
+        top_k_indices = set(np.argsort(imp_arr)[-k:].tolist())
+
+        mol_has_toxicophore = False
+        for pat_name, smarts in patterns.items():
+            pat = Chem.MolFromSmarts(smarts)
+            if pat is None:
+                continue
+            matches = mol.GetSubstructMatches(pat)
+            if not matches:
+                continue
+
+            mol_has_toxicophore = True
+            matched_atoms = set()
+            for match in matches:
+                matched_atoms.update(match)
+
+            # Precision: of matched atoms, how many are in top-K?
+            if matched_atoms:
+                precision = len(matched_atoms & top_k_indices) / len(matched_atoms)
+            else:
+                precision = 0.0
+            # Recall: of top-K atoms, how many are matched?
+            recall = len(matched_atoms & top_k_indices) / len(top_k_indices) if top_k_indices else 0.0
+
+            all_precisions.append(precision)
+            all_recalls.append(recall)
+
+            if pat_name not in results["per_pattern"]:
+                results["per_pattern"][pat_name] = {"precisions": [], "recalls": [], "count": 0}
+            results["per_pattern"][pat_name]["precisions"].append(precision)
+            results["per_pattern"][pat_name]["recalls"].append(recall)
+            results["per_pattern"][pat_name]["count"] += 1
+
+        if mol_has_toxicophore:
+            results["molecules_with_toxicophores"] += 1
+
+    # Aggregate per-pattern
+    for pat_name, data in results["per_pattern"].items():
+        data["mean_precision"] = float(np.mean(data["precisions"])) if data["precisions"] else 0.0
+        data["mean_recall"] = float(np.mean(data["recalls"])) if data["recalls"] else 0.0
+        del data["precisions"]
+        del data["recalls"]
+
+    results["overall_mean_precision"] = float(np.mean(all_precisions)) if all_precisions else 0.0
+    results["overall_mean_recall"] = float(np.mean(all_recalls)) if all_recalls else 0.0
+    results["num_evaluated_pairs"] = len(all_precisions)
+
+    return results

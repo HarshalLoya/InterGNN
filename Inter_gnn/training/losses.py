@@ -34,7 +34,20 @@ class PredictionLoss(nn.Module):
         # Handle NaN labels (multi-task missing labels)
         mask = ~torch.isnan(target)
         if mask.any():
-            return self.criterion(pred[mask], target[mask])
+            if self.task_type == "classification":
+                p_mask = pred[mask]
+                t_mask = target[mask]
+                # Dynamic Class Weighting
+                n_pos = torch.clamp((t_mask == 1).sum().float(), min=1.0)
+                n_neg = (t_mask == 0).sum().float()
+                # Prevent extreme pos_weights which might explode gradients (cap around 20)
+                pos_w = torch.clamp(n_neg / n_pos, min=1.0, max=20.0)
+                
+                return F.binary_cross_entropy_with_logits(
+                    p_mask, t_mask, pos_weight=pos_w
+                )
+            else:
+                return self.criterion(pred[mask], target[mask])
         return torch.tensor(0.0, device=pred.device)
 
 
